@@ -182,6 +182,8 @@ jobs:
       RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
       RELEASE_NAME: ${{ needs.plan.outputs.release_name }}
       BUILD_KIND: ${{ needs.plan.outputs.build_kind }}
+      TRACKER_COMMIT: ${{ needs.plan.outputs.tracker_commit }}
+      RECEIVER_COMMIT: ${{ needs.plan.outputs.receiver_commit }}
 
     steps:
       - name: Checkout personal config
@@ -229,10 +231,21 @@ jobs:
 
       - name: Clone upstream repositories
         run: |
+          set -euo pipefail
           mkdir -p zephyr-workspace
           cd zephyr-workspace
-          git clone --depth=1 --branch "$TRACKER_REF" "$TRACKER_REPO" tracker
-          git clone --depth=1 --branch "$RECEIVER_REF" "$RECEIVER_REPO" receiver
+          echo "Tracker ref: $TRACKER_REF"
+          echo "Tracker commit: $TRACKER_COMMIT"
+          echo "Receiver ref: $RECEIVER_REF"
+          echo "Receiver commit: $RECEIVER_COMMIT"
+
+          git clone --filter=blob:none --no-checkout "$TRACKER_REPO" tracker
+          git -C tracker fetch --depth=1 origin "$TRACKER_COMMIT"
+          git -C tracker checkout --detach "$TRACKER_COMMIT"
+
+          git clone --filter=blob:none --no-checkout "$RECEIVER_REPO" receiver
+          git -C receiver fetch --depth=1 origin "$RECEIVER_COMMIT"
+          git -C receiver checkout --detach "$RECEIVER_COMMIT"
 
       - name: Apply tracker no-idle-WOM patch
         run: |
