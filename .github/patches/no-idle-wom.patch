@@ -1,0 +1,61 @@
+diff --git a/Kconfig b/Kconfig
+index 8e56ecb..d89a659 100644
+--- a/Kconfig
++++ b/Kconfig
+@@ -137,6 +137,14 @@ config CONNECTION_TIMEOUT_DELAY
+     help
+         Connection timeout duration when receiver is not detected.
+ 
++config CONNECTION_TIMEOUT_USE_WOM
++    bool "Use IMU wake up on connection timeout"
++    default n
++    depends on USER_SHUTDOWN && USE_IMU_WAKE_UP
++    help
++        Enter IMU wake up mode instead of system off when the receiver is not
++        detected for the connection timeout duration.
++
+ choice
+     prompt "Sensor rotation"
+     default SENSOR_ROTATION_90
+diff --git a/no_idle_wom.conf b/no_idle_wom.conf
+new file mode 100644
+index 0000000..0b49f16
+--- /dev/null
++++ b/no_idle_wom.conf
+@@ -0,0 +1,8 @@
++# Keep trackers active while connected. Enter WOM only when the receiver has
++# been unavailable for the connection timeout duration.
++CONFIG_USE_IMU_WAKE_UP=y
++CONFIG_CONNECTION_TIMEOUT_USE_WOM=y
++CONFIG_USE_ACTIVE_TIMEOUT=n
++CONFIG_USE_IMU_TIMEOUT=n
++CONFIG_SENSOR_USE_LOW_POWER_2=n
++CONFIG_CONNECTION_TIMEOUT_DELAY=30000
+diff --git a/src/connection/esb.c b/src/connection/esb.c
+index 9931412..791805c 100644
+--- a/src/connection/esb.c
++++ b/src/connection/esb.c
+@@ -1293,7 +1293,11 @@ void esb_pair(void)
+ 			if (!shutdown_requested && (k_uptime_get() - pair_start_time) > CONFIG_CONNECTION_TIMEOUT_DELAY) {
+ 				LOG_WRN("Pairing timeout after %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
+ 				shutdown_requested = true;
++#if CONFIG_CONNECTION_TIMEOUT_USE_WOM
++				sys_request_WOM(true, false);
++#else
+ 				sys_request_system_off(false);
++#endif
+ 			}
+ #endif
+ 			if (paired_addr[0]) {
+@@ -1729,7 +1733,11 @@ static void esb_thread(void)
+ 			{
+ 				LOG_WRN("No response from receiver in %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
+ 				shutdown_requested = true;
++#if CONFIG_CONNECTION_TIMEOUT_USE_WOM
++				sys_request_WOM(true, false);
++#else
+ 				sys_request_system_off(false);
++#endif
+ 			}
+ #endif
+ 		}
