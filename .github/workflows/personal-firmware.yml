@@ -253,10 +253,52 @@ jobs:
           if git -C zephyr-workspace/tracker apply --check "$PATCH"; then
             git -C zephyr-workspace/tracker apply "$PATCH"
           else
-            echo "Patch did not apply; checking whether upstream already has the required files."
+            echo "Patch did not apply; applying no-idle-WOM changes directly."
+            python3 <<'PY'
+          from pathlib import Path
+
+          root = Path("zephyr-workspace/tracker")
+
+          kconfig = root / "Kconfig"
+          text = kconfig.read_text(encoding="utf-8")
+          if "config CONNECTION_TIMEOUT_USE_WOM" not in text:
+              marker = "config CONNECTION_TIMEOUT_DELAY"
+              start = text.index(marker)
+              next_choice = text.index("\nchoice", start)
+              block = """
+          config CONNECTION_TIMEOUT_USE_WOM
+              bool "Use IMU wake up on connection timeout"
+              default n
+              depends on USER_SHUTDOWN && USE_IMU_WAKE_UP
+              help
+                  Enter IMU wake up mode instead of system off when the receiver is not
+                  detected for the connection timeout duration.
+          """
+              text = text[:next_choice] + block + text[next_choice:]
+              kconfig.write_text(text, encoding="utf-8")
+
+          esb = root / "src/connection/esb.c"
+          text = esb.read_text(encoding="utf-8")
+          old = "\t\t\t\tshutdown_requested = true;\n\t\t\t\tsys_request_system_off(false);"
+          new = "\t\t\t\tshutdown_requested = true;\n#if CONFIG_CONNECTION_TIMEOUT_USE_WOM\n\t\t\t\tsys_request_WOM(true, false);\n#else\n\t\t\t\tsys_request_system_off(false);\n#endif"
+          if "CONFIG_CONNECTION_TIMEOUT_USE_WOM" not in text:
+              text = text.replace(old, new, 2)
+              esb.write_text(text, encoding="utf-8")
+
+          (root / "no_idle_wom.conf").write_text("""# Keep trackers active while connected. Enter WOM only when the receiver has
+          # been unavailable for the connection timeout duration.
+          CONFIG_USE_IMU_WAKE_UP=y
+          CONFIG_CONNECTION_TIMEOUT_USE_WOM=y
+          CONFIG_USE_ACTIVE_TIMEOUT=n
+          CONFIG_USE_IMU_TIMEOUT=n
+          CONFIG_SENSOR_USE_LOW_POWER_2=n
+          CONFIG_CONNECTION_TIMEOUT_DELAY=30000
+          """, encoding="utf-8")
+          PY
           fi
           test -f zephyr-workspace/tracker/no_idle_wom.conf
           grep -q "CONFIG_CONNECTION_TIMEOUT_USE_WOM" zephyr-workspace/tracker/Kconfig
+          grep -q "CONFIG_CONNECTION_TIMEOUT_USE_WOM" zephyr-workspace/tracker/src/connection/esb.c
 
       - name: Cache West workspace
         uses: actions/cache@v5
