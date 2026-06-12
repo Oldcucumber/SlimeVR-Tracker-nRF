@@ -2,9 +2,18 @@ name: Personal firmware
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
+      build_kind:
+        description: "Which upstream state to build"
+        required: false
+        type: choice
+        default: "auto"
+        options:
+          - auto
+          - ci
+          - release
       tracker_ref:
         description: "Tracker upstream ref"
         required: false
@@ -13,13 +22,8 @@ on:
         description: "Receiver upstream ref"
         required: false
         default: "dev"
-      publish_release:
-        description: "Upload artifacts to a GitHub Release"
-        required: false
-        type: boolean
-        default: false
       release_tag:
-        description: "Release tag to use when publishing manually"
+        description: "Release tag to use when manually overriding"
         required: false
         default: ""
   push:
@@ -39,16 +43,145 @@ env:
   ZEPHYR_SDK_VERSION: "0.17.4"
   TRACKER_REPO: "https://github.com/jitingcn/SlimeVR-Tracker-nRF.git"
   RECEIVER_REPO: "https://github.com/jitingcn/SlimeVR-Tracker-nRF-Receiver.git"
-  TRACKER_REF: ${{ inputs.tracker_ref || 'dev' }}
-  RECEIVER_REF: ${{ inputs.receiver_ref || 'dev' }}
   TRACKER_BOARD: "promicro_uf2/nrf52840/default_spi"
   TRACKER_FILENAME: "SlimeNRF_ProMicro_Tracker_SPI_NoIdleWOM"
   RECEIVER_BOARD: "aerorx_r1_uf2/nrf52840"
   RECEIVER_FILENAME: "AeroRX_R1_Receiver"
 
 jobs:
-  build:
+  plan:
     runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.plan.outputs.should_build }}
+      build_kind: ${{ steps.plan.outputs.build_kind }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      release_name: ${{ steps.plan.outputs.release_name }}
+      tracker_ref: ${{ steps.plan.outputs.tracker_ref }}
+      receiver_ref: ${{ steps.plan.outputs.receiver_ref }}
+      tracker_commit: ${{ steps.plan.outputs.tracker_commit }}
+      receiver_commit: ${{ steps.plan.outputs.receiver_commit }}
+    steps:
+      - name: Checkout personal config
+        uses: actions/checkout@v6
+
+      - name: Plan upstream build
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_KIND_INPUT: ${{ inputs.build_kind || 'auto' }}
+          TRACKER_REF_INPUT: ${{ inputs.tracker_ref || 'dev' }}
+          RECEIVER_REF_INPUT: ${{ inputs.receiver_ref || 'dev' }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          sanitize() {
+            echo "$1" | tr '/: ' '---' | tr -cd 'A-Za-z0-9._-'
+          }
+
+          tag_exists() {
+            git ls-remote --exit-code --tags origin "refs/tags/$1" >/dev/null 2>&1
+          }
+
+          latest_release_tag() {
+            gh api "repos/$1/releases/latest" --jq '.tag_name' 2>/dev/null || true
+          }
+
+          resolve_commit() {
+            git ls-remote "$1" "$2" | awk 'NR == 1 {print $1}'
+          }
+
+          tracker_dev_ref="$TRACKER_REF_INPUT"
+          receiver_dev_ref="$RECEIVER_REF_INPUT"
+          tracker_dev_commit="$(resolve_commit "$TRACKER_REPO" "refs/heads/$tracker_dev_ref")"
+          receiver_dev_commit="$(resolve_commit "$RECEIVER_REPO" "refs/heads/$receiver_dev_ref")"
+          if [ -z "$tracker_dev_commit" ] || [ -z "$receiver_dev_commit" ]; then
+            echo "Failed to resolve upstream dev refs" >&2
+            exit 1
+          fi
+
+          tracker_release_tag="$(latest_release_tag jitingcn/SlimeVR-Tracker-nRF)"
+          receiver_release_tag="$(latest_release_tag jitingcn/SlimeVR-Tracker-nRF-Receiver)"
+
+          choose_ci() {
+            build_kind="ci"
+            tracker_ref="$tracker_dev_ref"
+            receiver_ref="$receiver_dev_ref"
+            tracker_commit="$tracker_dev_commit"
+            receiver_commit="$receiver_dev_commit"
+            release_tag="personal-ci-${tracker_dev_commit:0:7}-${receiver_dev_commit:0:7}"
+            release_name="Personal CI ${tracker_dev_commit:0:7}/${receiver_dev_commit:0:7}"
+          }
+
+          choose_release() {
+            build_kind="release"
+            tracker_ref="${tracker_release_tag:-$tracker_dev_ref}"
+            receiver_ref="${receiver_release_tag:-$receiver_dev_ref}"
+            tracker_commit="$(resolve_commit "$TRACKER_REPO" "refs/tags/$tracker_ref")"
+            receiver_commit="$(resolve_commit "$RECEIVER_REPO" "refs/tags/$receiver_ref")"
+            if [ -z "$tracker_commit" ]; then
+              tracker_commit="$tracker_dev_commit"
+            fi
+            if [ -z "$receiver_commit" ]; then
+              receiver_commit="$receiver_dev_commit"
+            fi
+            if [ -n "$tracker_release_tag$receiver_release_tag" ]; then
+              release_tag="personal-release-t$(sanitize "${tracker_release_tag:-dev}")-r$(sanitize "${receiver_release_tag:-dev}")"
+            else
+              release_tag="personal-release-dev-${tracker_dev_commit:0:7}-${receiver_dev_commit:0:7}"
+            fi
+            release_name="Personal upstream release tracker ${tracker_release_tag:-dev}, receiver ${receiver_release_tag:-dev}"
+          }
+
+          kind="$BUILD_KIND_INPUT"
+          if [ -n "$RELEASE_TAG_INPUT" ]; then
+            choose_ci
+            release_tag="$RELEASE_TAG_INPUT"
+            release_name="Personal manual $RELEASE_TAG_INPUT"
+          elif [ "$kind" = "ci" ]; then
+            choose_ci
+          elif [ "$kind" = "release" ]; then
+            choose_release
+          else
+            if [ -n "$tracker_release_tag$receiver_release_tag" ]; then
+              choose_release
+              if tag_exists "$release_tag"; then
+                choose_ci
+              fi
+            else
+              choose_ci
+            fi
+          fi
+
+          if tag_exists "$release_tag"; then
+            should_build=false
+            echo "Release tag already exists: $release_tag"
+          else
+            should_build=true
+            echo "Will build $build_kind release: $release_tag"
+          fi
+
+          {
+            echo "should_build=$should_build"
+            echo "build_kind=$build_kind"
+            echo "release_tag=$release_tag"
+            echo "release_name=$release_name"
+            echo "tracker_ref=$tracker_ref"
+            echo "receiver_ref=$receiver_ref"
+            echo "tracker_commit=$tracker_commit"
+            echo "receiver_commit=$receiver_commit"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    env:
+      TRACKER_REF: ${{ needs.plan.outputs.tracker_ref }}
+      RECEIVER_REF: ${{ needs.plan.outputs.receiver_ref }}
+      RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+      RELEASE_NAME: ${{ needs.plan.outputs.release_name }}
+      BUILD_KIND: ${{ needs.plan.outputs.build_kind }}
 
     steps:
       - name: Checkout personal config
@@ -180,6 +313,8 @@ jobs:
             echo "receiver_repo=$RECEIVER_REPO"
             echo "receiver_ref=$RECEIVER_REF"
             echo "receiver_commit=$(git -C zephyr-workspace/receiver rev-parse HEAD)"
+            echo "build_kind=$BUILD_KIND"
+            echo "release_tag=$RELEASE_TAG"
             echo "workflow_commit=$GITHUB_SHA"
             echo "run_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             date -u +"built_at_utc=%Y-%m-%dT%H:%M:%SZ"
@@ -201,24 +336,11 @@ jobs:
             zephyr-workspace/Releases/SOURCES.txt
             personal-firmware.zip
 
-      - name: Compute release tag
-        id: release-tag
-        if: ${{ github.ref_type == 'tag' || inputs.publish_release == true || inputs.publish_release == 'true' }}
-        run: |
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            tag="$GITHUB_REF_NAME"
-          elif [ -n "${{ inputs.release_tag }}" ]; then
-            tag="${{ inputs.release_tag }}"
-          else
-            tag="personal-${GITHUB_RUN_NUMBER}"
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
       - name: Upload GitHub Release
-        if: ${{ steps.release-tag.outputs.tag != '' }}
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ steps.release-tag.outputs.tag }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
           fail_on_unmatched_files: true
           files: |
             zephyr-workspace/Releases/*.uf2
@@ -251,11 +373,13 @@ jobs:
           password: ${{ secrets.MAIL_PASSWORD }}
           from: ${{ secrets.MAIL_FROM }}
           to: ${{ secrets.MAIL_TO }}
-          subject: "SlimeVR personal firmware build succeeded"
+          subject: "SlimeVR personal ${{ env.BUILD_KIND }} firmware build succeeded"
           body: |
             The personal firmware build succeeded.
 
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}
+            Build kind: ${{ env.BUILD_KIND }}
             Tracker: ${{ env.TRACKER_BOARD }}
             Receiver: ${{ env.RECEIVER_BOARD }}
           attachments: personal-firmware.zip
@@ -270,10 +394,11 @@ jobs:
           password: ${{ secrets.MAIL_PASSWORD }}
           from: ${{ secrets.MAIL_FROM }}
           to: ${{ secrets.MAIL_TO }}
-          subject: "SlimeVR personal firmware build failed"
+          subject: "SlimeVR personal ${{ env.BUILD_KIND }} firmware build failed"
           body: |
             The personal firmware build failed.
 
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Build kind: ${{ env.BUILD_KIND }}
             Tracker: ${{ env.TRACKER_BOARD }}
             Receiver: ${{ env.RECEIVER_BOARD }}
