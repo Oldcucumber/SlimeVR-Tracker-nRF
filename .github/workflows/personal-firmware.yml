@@ -60,6 +60,10 @@ jobs:
       receiver_ref: ${{ steps.plan.outputs.receiver_ref }}
       tracker_commit: ${{ steps.plan.outputs.tracker_commit }}
       receiver_commit: ${{ steps.plan.outputs.receiver_commit }}
+      tracker_upstream_kind: ${{ steps.plan.outputs.tracker_upstream_kind }}
+      receiver_upstream_kind: ${{ steps.plan.outputs.receiver_upstream_kind }}
+      tracker_release_tag: ${{ steps.plan.outputs.tracker_release_tag }}
+      receiver_release_tag: ${{ steps.plan.outputs.receiver_release_tag }}
     steps:
       - name: Checkout personal config
         uses: actions/checkout@v6
@@ -84,7 +88,12 @@ jobs:
           }
 
           latest_release_tag() {
-            gh api "repos/$1/releases/latest" --jq '.tag_name' 2>/dev/null || true
+            local tag
+            tag="$(gh api "repos/$1/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
+            if [[ "$tag" == \{* ]] || [[ "$tag" == *"Not Found"* ]]; then
+              tag=""
+            fi
+            echo "$tag"
           }
 
           resolve_commit() {
@@ -109,6 +118,8 @@ jobs:
             receiver_ref="$receiver_dev_ref"
             tracker_commit="$tracker_dev_commit"
             receiver_commit="$receiver_dev_commit"
+            tracker_upstream_kind="ci"
+            receiver_upstream_kind="ci"
             release_tag="personal-ci-${tracker_dev_commit:0:7}-${receiver_dev_commit:0:7}"
             release_name="Personal CI ${tracker_dev_commit:0:7}/${receiver_dev_commit:0:7}"
           }
@@ -124,6 +135,16 @@ jobs:
             fi
             if [ -z "$receiver_commit" ]; then
               receiver_commit="$receiver_dev_commit"
+            fi
+            if [ -n "$tracker_release_tag" ]; then
+              tracker_upstream_kind="release"
+            else
+              tracker_upstream_kind="ci"
+            fi
+            if [ -n "$receiver_release_tag" ]; then
+              receiver_upstream_kind="release"
+            else
+              receiver_upstream_kind="ci"
             fi
             if [ -n "$tracker_release_tag$receiver_release_tag" ]; then
               release_tag="personal-release-t$(sanitize "${tracker_release_tag:-dev}")-r$(sanitize "${receiver_release_tag:-dev}")"
@@ -170,6 +191,10 @@ jobs:
             echo "receiver_ref=$receiver_ref"
             echo "tracker_commit=$tracker_commit"
             echo "receiver_commit=$receiver_commit"
+            echo "tracker_upstream_kind=$tracker_upstream_kind"
+            echo "receiver_upstream_kind=$receiver_upstream_kind"
+            echo "tracker_release_tag=$tracker_release_tag"
+            echo "receiver_release_tag=$receiver_release_tag"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -184,6 +209,10 @@ jobs:
       BUILD_KIND: ${{ needs.plan.outputs.build_kind }}
       TRACKER_COMMIT: ${{ needs.plan.outputs.tracker_commit }}
       RECEIVER_COMMIT: ${{ needs.plan.outputs.receiver_commit }}
+      TRACKER_UPSTREAM_KIND: ${{ needs.plan.outputs.tracker_upstream_kind }}
+      RECEIVER_UPSTREAM_KIND: ${{ needs.plan.outputs.receiver_upstream_kind }}
+      TRACKER_RELEASE_TAG: ${{ needs.plan.outputs.tracker_release_tag }}
+      RECEIVER_RELEASE_TAG: ${{ needs.plan.outputs.receiver_release_tag }}
 
     steps:
       - name: Checkout personal config
@@ -318,9 +347,13 @@ jobs:
           {
             echo "tracker_repo=$TRACKER_REPO"
             echo "tracker_ref=$TRACKER_REF"
+            echo "tracker_upstream_kind=$TRACKER_UPSTREAM_KIND"
+            echo "tracker_release_tag=$TRACKER_RELEASE_TAG"
             echo "tracker_commit=$(git -C zephyr-workspace/tracker rev-parse HEAD)"
             echo "receiver_repo=$RECEIVER_REPO"
             echo "receiver_ref=$RECEIVER_REF"
+            echo "receiver_upstream_kind=$RECEIVER_UPSTREAM_KIND"
+            echo "receiver_release_tag=$RECEIVER_RELEASE_TAG"
             echo "receiver_commit=$(git -C zephyr-workspace/receiver rev-parse HEAD)"
             echo "build_kind=$BUILD_KIND"
             echo "release_tag=$RELEASE_TAG"
@@ -328,6 +361,23 @@ jobs:
             echo "run_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             date -u +"built_at_utc=%Y-%m-%dT%H:%M:%SZ"
           } > zephyr-workspace/Releases/SOURCES.txt
+
+          cat > zephyr-workspace/Releases/RELEASE_BODY.md <<EOF
+          Personal firmware build.
+
+          | Item | Kind | Ref / Tag | Commit |
+          | --- | --- | --- | --- |
+          | Tracker | $TRACKER_UPSTREAM_KIND | $TRACKER_REF | $(git -C zephyr-workspace/tracker rev-parse --short=12 HEAD) |
+          | Receiver | $RECEIVER_UPSTREAM_KIND | $RECEIVER_REF | $(git -C zephyr-workspace/receiver rev-parse --short=12 HEAD) |
+
+          Build kind: $BUILD_KIND
+
+          Workflow: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          Artifacts:
+          - $TRACKER_FILENAME.uf2
+          - $RECEIVER_FILENAME.uf2
+          EOF
 
       - name: Package firmware
         run: |
@@ -343,6 +393,7 @@ jobs:
           path: |
             zephyr-workspace/Releases/*.uf2
             zephyr-workspace/Releases/SOURCES.txt
+            zephyr-workspace/Releases/RELEASE_BODY.md
             personal-firmware.zip
 
       - name: Upload GitHub Release
@@ -350,10 +401,12 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_NAME }}
+          body_path: zephyr-workspace/Releases/RELEASE_BODY.md
           fail_on_unmatched_files: true
           files: |
             zephyr-workspace/Releases/*.uf2
             zephyr-workspace/Releases/SOURCES.txt
+            zephyr-workspace/Releases/RELEASE_BODY.md
 
       - name: Check mail secrets
         id: mail
